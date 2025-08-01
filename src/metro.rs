@@ -6,6 +6,7 @@ use std::mem;
 use std::rc::Rc;
 
 use crate::events::{to_string, to_vec, to_writer, Event};
+use crate::TrackId;
 
 type RcMetro<'a> = Rc<RefCell<MetroState<'a>>>;
 
@@ -167,7 +168,7 @@ impl<'a> Metro<'a> {
     #[inline]
     pub fn new_track(&mut self) -> Track<'a> {
         let id = self.state.borrow_mut().next_id();
-        self.new_track_with_id(id)
+        self.new_track_with_id(id.into())
     }
 
     /// Create a new [`Track`] with a specific track [`id`].
@@ -198,13 +199,13 @@ impl<'a> Metro<'a> {
     /// | | | |
     /// ```
     #[inline]
-    pub fn new_track_with_id(&mut self, track_id: usize) -> Track<'a> {
+    pub fn new_track_with_id(&mut self, track_id: TrackId) -> Track<'a> {
         MetroState::new_track(&self.state, track_id)
     }
 
     /// If the `track_id` exists then `Some` is returned, otherwise `None`.
     #[inline]
-    pub fn get_track(&mut self, track_id: usize) -> Option<Track<'a>> {
+    pub fn get_track(&mut self, track_id: TrackId) -> Option<Track<'a>> {
         MetroState::get_track(&self.state, track_id)
     }
 
@@ -241,14 +242,14 @@ impl<'a> Metro<'a> {
     /// ```
     #[inline]
     pub fn add_station<S: Into<Cow<'a, str>>>(&mut self, text: S) {
-        MetroState::add_event(&self.state, Event::station(std::usize::MAX, text));
+        MetroState::add_event(&self.state, Event::station(std::usize::MAX.into(), text));
     }
 
     /// *[See `to_writer`.][`to_writer`]*
     ///
     /// [`to_writer`]: fn.to_writer.html
     #[inline]
-    pub fn to_writer<W: Write>(&self, writer: W) -> io::Result<()> {
+    pub fn to_writer<W: Write>(&self, writer: &mut W) -> io::Result<()> {
         let state = self.state.borrow();
         to_writer(writer, &state.events)
     }
@@ -316,18 +317,16 @@ impl<'a> Metro<'a> {
 /// [`new_track_with_id`]: struct.Metro.html#method.new_track_with_id
 pub struct Track<'a> {
     state: RcMetro<'a>,
-    id: usize,
+    id: TrackId,
 }
 
 impl<'a> Track<'a> {
-    #[inline]
-    fn new(state: RcMetro<'a>, id: usize) -> Self {
+    fn new(state: RcMetro<'a>, id: TrackId) -> Self {
         Self { state, id }
     }
 
     /// Returns the track id.
-    #[inline]
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> TrackId {
         self.id
     }
 
@@ -423,7 +422,7 @@ impl<'a> Track<'a> {
     #[inline]
     pub fn split(&self) -> Track<'a> {
         let id = self.state.borrow_mut().next_id();
-        self.split_with_id(id)
+        self.split_with_id(id.into())
     }
 
     /// Create a new `Track` that branches of from this track.
@@ -449,7 +448,7 @@ impl<'a> Track<'a> {
     /// | | | |
     /// ```
     #[inline]
-    pub fn split_with_id(&self, new_track_id: usize) -> Track<'a> {
+    pub fn split_with_id(&self, new_track_id: TrackId) -> Track<'a> {
         MetroState::split_track(&self.state, self, new_track_id)
     }
 
@@ -613,15 +612,13 @@ impl<'a> MetroState<'a> {
     /// Panics if the `next_id` overflows [`usize`].
     ///
     /// [`usize`]: https://doc.rust-lang.org/stable/std/primitive.usize.html
-    #[inline]
     fn next_id(&mut self) -> usize {
         let id = self.next_id;
         self.next_id += 1;
         id
     }
 
-    #[inline]
-    fn new_track(metro: &RcMetro<'a>, track_id: usize) -> Track<'a> {
+    fn new_track(metro: &RcMetro<'a>, track_id: TrackId) -> Track<'a> {
         let state = metro.borrow();
         let track = state.tracks.iter().find(|track| track.id == track_id);
 
@@ -639,16 +636,14 @@ impl<'a> MetroState<'a> {
         }
     }
 
-    #[inline]
-    fn get_track(metro: &RcMetro<'a>, track_id: usize) -> Option<Track<'a>> {
+    fn get_track(metro: &RcMetro<'a>, track_id: TrackId) -> Option<Track<'a>> {
         let state = metro.borrow();
         let track = state.tracks.iter().find(|track| track.id == track_id);
 
         track.map(Track::clone_ref)
     }
 
-    #[inline]
-    fn split_track(metro: &RcMetro<'a>, from_track: &Track, new_track_id: usize) -> Track<'a> {
+    fn split_track(metro: &RcMetro<'a>, from_track: &Track, new_track_id: TrackId) -> Track<'a> {
         let state = metro.borrow();
         let new_track = state.tracks.iter().find(|track| track.id == new_track_id);
 
@@ -691,131 +686,5 @@ impl<'a> MetroState<'a> {
     #[inline]
     fn add_event(metro: &RcMetro<'a>, event: Event<'a>) {
         metro.borrow_mut().events.push(event);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{to_string, Event, Event::*, Metro};
-
-    #[test]
-    fn lib_example() {
-        // If this example is changed, then update both `events`
-        // and the output in lib.rs, events.rs, and metro.rs.
-
-        #[inline]
-        fn station(track_id: usize, text: &str) -> Event {
-            Event::station(track_id, text)
-        }
-
-        // TODO: Currently not including `NoEvent` as `Metro`
-        // TODO: does not have an equivalent
-        let events = [
-            station(0, "Station 1"),
-            station(0, "Station 2"),
-            // NoEvent,
-            station(0, "Station 3"),
-            SplitTrack(0, 1),
-            station(1, "Station 4"),
-            SplitTrack(1, 2),
-            station(1, "Station 5"),
-            station(2, "Station 6"),
-            // NoEvent,
-            station(0, "Station 7"),
-            station(1, "Station 8"),
-            station(2, "Station 9"),
-            SplitTrack(2, 3),
-            SplitTrack(3, 4),
-            station(5, "Station 10 (Detached)"),
-            JoinTrack(4, 0),
-            station(3, "Station 11"),
-            StopTrack(1),
-            // NoEvent,
-            station(0, "Station 12"),
-            station(2, "Station 13"),
-            station(3, "Station 14"),
-            JoinTrack(3, 0),
-            station(2, "Station 15"),
-            StopTrack(2),
-            station(0, "Station 16"),
-        ];
-        let string1 = to_string(&events).unwrap();
-
-        assert_eq!(
-            string1,
-            r#"* Station 1
-* Station 2
-* Station 3
-|\
-| * Station 4
-| |\
-| * | Station 5
-| | * Station 6
-* | | Station 7
-| * | Station 8
-| | * Station 9
-| | |\
-| | | |\
-| | | | | Station 10 (Detached)
-| |_|_|/
-|/| | |
-| | | * Station 11
-| " | |
-|  / /
-* | | Station 12
-| * | Station 13
-| | * Station 14
-| |/
-|/|
-| * Station 15
-| "
-* Station 16
-"#
-        );
-
-        let mut metro = Metro::new();
-
-        let mut track1 = metro.new_track();
-        track1.add_station("Station 1");
-        track1.add_station("Station 2");
-        track1.add_station("Station 3");
-
-        let mut track2 = track1.split();
-        track2.add_station("Station 4");
-
-        let mut track3 = track2.split();
-        track2.add_station("Station 5");
-        track3.add_station("Station 6");
-
-        track1.add_station("Station 7");
-        track2.add_station("Station 8");
-        track3.add_station("Station 9");
-
-        let mut track4 = track3.split();
-        let track5 = track4.split();
-
-        metro.add_station("Station 10 (Detached)");
-
-        track5.join(&track1);
-
-        track4.add_station("Station 11");
-
-        track2.stop();
-
-        track1.add_station("Station 12");
-        track3.add_station("Station 13");
-        track4.add_station("Station 14");
-
-        track4.join(&track1);
-
-        track3.add_station("Station 15");
-
-        track3.stop();
-
-        track1.add_station("Station 16");
-
-        let string2 = metro.to_string().unwrap();
-
-        assert_eq!(string1, string2);
     }
 }

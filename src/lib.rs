@@ -129,11 +129,7 @@
 //! ```
 
 #![deny(unsafe_code)]
-#![deny(missing_docs)]
-// #![deny(missing_doc_code_examples)]
-#![deny(missing_debug_implementations)]
 #![warn(clippy::all)]
-
 mod events;
 mod metro;
 

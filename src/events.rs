@@ -1,6 +1,7 @@
+use derive_more::{From, Into};
+use owo_colors::{OwoColorize, XtermColors};
 use std::borrow::Cow;
 use std::io::{self, Write};
-use std::iter;
 
 /// `Event`s are produced automatically by using [`Metro`],
 /// but can also be created and used manually.
@@ -94,7 +95,7 @@ pub enum Event<'a> {
     /// | | |
     /// | | | |
     /// ```
-    StartTrack(usize),
+    StartTrack(TrackId),
 
     /// `StartTracks(track_ids)`
     ///
@@ -111,7 +112,7 @@ pub enum Event<'a> {
     /// | | |
     /// | | | | |
     /// ```
-    StartTracks(&'a [usize]),
+    StartTracks(&'a [TrackId]),
 
     /// `StopTrack(track_id)`
     ///
@@ -129,7 +130,7 @@ pub enum Event<'a> {
     /// |  /
     /// | |
     /// ```
-    StopTrack(usize),
+    StopTrack(TrackId),
 
     /// `Station(track_id, text)`
     ///
@@ -164,7 +165,7 @@ pub enum Event<'a> {
     /// | | | Hello World
     /// | | |
     /// ```
-    Station(usize, Cow<'a, str>),
+    Station(TrackId, Cow<'a, str>),
 
     /// `SplitTrack(from_track_id, new_track_id)`
     ///
@@ -185,7 +186,7 @@ pub enum Event<'a> {
     /// | |\ \
     /// | | | |
     /// ```
-    SplitTrack(usize, usize),
+    SplitTrack(TrackId, TrackId),
 
     /// `JoinTrack(from_track_id, to_track_id)`
     ///
@@ -219,7 +220,7 @@ pub enum Event<'a> {
     /// |/| | | |
     /// | | | | |
     /// ```
-    JoinTrack(usize, usize),
+    JoinTrack(TrackId, TrackId),
 
     /// `NoEvent` produces one row of rails.
     ///
@@ -238,10 +239,14 @@ impl<'a> Event<'a> {
     ///
     /// [`Event::Station`]: enum.Event.html#variant.Station
     #[inline]
-    pub fn station<S: Into<Cow<'a, str>>>(track_id: usize, text: S) -> Self {
+    pub fn station<S: Into<Cow<'a, str>>>(track_id: TrackId, text: S) -> Self {
         Self::Station(track_id, text.into())
     }
 }
+
+#[derive(PartialEq, Eq, Hash, From, Into, Debug, Clone, Copy)]
+/// An ID referencing a `Track`
+pub struct TrackId(usize);
 
 /// Write `&[`[`Event`]`]` to [`<W: io::Write>`].
 /// Defines a default track with `track_id` of `0`.
@@ -258,183 +263,169 @@ impl<'a> Event<'a> {
 /// [`Metro::to_writer`]: struct.Metro.html#method.to_writer
 ///
 /// [`<W: io::Write>`]: https://doc.rust-lang.org/stable/std/io/trait.Write.html
-pub fn to_writer<W: Write>(mut writer: W, events: &[Event]) -> io::Result<()> {
-    let mut tracks = vec![0];
+pub fn to_writer<W: Write>(w: &mut W, events: &[Event]) -> io::Result<()> {
+    let mut tracks = vec![0.into()];
+    let widest_track = events
+        .iter()
+        .fold((1, 1), |(current, max), e| {
+            let current = match e {
+                Event::StartTrack(_) => current + 1,
+                Event::StartTracks(track_ids) => current + track_ids.len(),
+                Event::StopTrack(_) => current - 1,
+                Event::SplitTrack(_, _) => current + 1,
+                Event::JoinTrack(_, _) => current - 1,
+                _ => current,
+            };
+            (current, max.max(current))
+        })
+        .1;
 
     for event in events {
-        use Event::*;
         match event {
-            &StartTrack(track_id) => {
-                if !tracks.contains(&track_id) {
-                    tracks.push(track_id);
-
-                    let line = iter::repeat("|")
-                        .take(tracks.len())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-
-                    writeln!(&mut writer, "{}", line)?;
-                }
+            Event::StartTrack(track_id) => {
+                assert!(!tracks.contains(track_id));
+                tracks.push(*track_id);
             }
-
-            &StartTracks(track_ids) => {
-                let mut render = false;
-
+            Event::StartTracks(track_ids) => {
                 for track_id in track_ids.iter() {
-                    if !tracks.contains(track_id) {
-                        tracks.push(*track_id);
-
-                        render = true;
-                    }
-                }
-
-                if render {
-                    let line = iter::repeat("|")
-                        .take(tracks.len())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-
-                    writeln!(&mut writer, "{}", line)?;
+                    assert!(!tracks.contains(track_id));
+                    tracks.push(*track_id);
                 }
             }
-
-            &StopTrack(track_id) => stop_track(&mut writer, &mut tracks, track_id)?,
-
-            Station(track_id, station_name) => {
-                let mut line = tracks
+            Event::StopTrack(stopped) => {
+                assert!(tracks.contains(stopped));
+                tracks.retain(|t| t != stopped);
+                for track_id in tracks.iter() {
+                    write!(
+                        w,
+                        "{}",
+                        if track_id == stopped { "╧" } else { "│" }.color(to_color(*track_id))
+                    )?;
+                }
+                writeln!(w)?;
+            }
+            Event::Station(target_id, cow) => {
+                for (i, line) in cow.lines().enumerate() {
+                    for track_id in tracks.iter() {
+                        write!(
+                            w,
+                            "{}",
+                            if i == 0 && track_id == target_id {
+                                "║"
+                            } else {
+                                "│"
+                            }
+                            .color(to_color(*track_id))
+                        )?;
+                    }
+                    write!(
+                        w,
+                        "{line:>pad$}",
+                        pad = line.len() + widest_track - tracks.len() + 3
+                    )?;
+                    writeln!(w)?;
+                }
+                for track_id in tracks.iter() {
+                    write!(w, "{}", "│".color(to_color(*track_id)))?;
+                }
+                writeln!(w)?;
+            }
+            Event::SplitTrack(parent, child) => {
+                let parent_position = tracks
                     .iter()
-                    .map(|&id| if id == *track_id { "*" } else { "|" })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                for (i, station_name) in station_name.lines().enumerate() {
-                    if i == 1 {
-                        line = iter::repeat("|")
-                            .take(tracks.len())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                    }
-
-                    writeln!(&mut writer, "{} {}", line, station_name)?;
-                }
-            }
-
-            &SplitTrack(from_track_id, new_track_id) => {
-                if !tracks.contains(&new_track_id) {
-                    let from_track_index = tracks.iter().position(|&id| id == from_track_id);
-
-                    if let Some(from_track_index) = from_track_index {
-                        let line = (0..tracks.len())
-                            .map(|i| {
-                                use std::cmp::Ordering::*;
-                                match i.cmp(&from_track_index) {
-                                    Greater => "\\",
-                                    Equal => "|\\",
-                                    Less => "|",
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
-
-                        writeln!(&mut writer, "{}", line)?;
-
-                        tracks.insert(from_track_index + 1, new_track_id);
-                    } else {
-                        tracks.push(new_track_id);
-
-                        let line = iter::repeat("|")
-                            .take(tracks.len())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-
-                        writeln!(&mut writer, "{}", line)?;
-                    }
-                }
-            }
-
-            &JoinTrack(from_track_id, to_track_id) => {
-                let from_track_index = tracks.iter().position(|&id| id == from_track_id);
-
-                if from_track_id == to_track_id {
-                    stop_track(&mut writer, &mut tracks, from_track_id)?;
-                    continue;
-                }
-
-                if let Some(from_track_index) = from_track_index {
-                    let to_track_index = tracks.iter().position(|&id| id == to_track_id);
-
-                    if let Some(to_track_index) = to_track_index {
-                        let left_index = from_track_index.min(to_track_index);
-                        let right_index = from_track_index.max(to_track_index);
-
-                        if (right_index - left_index) == 1 {
-                            let line = (0..tracks.len())
-                                .filter_map(|i| {
-                                    if i > right_index {
-                                        Some("/")
-                                    } else if i == left_index {
-                                        Some("|/")
-                                    } else if i != right_index {
-                                        Some("|")
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join(" ");
-
-                            writeln!(&mut writer, "{}", line)?;
-                        } else {
-                            let line = (0..tracks.len())
-                                .filter_map(|i| {
-                                    if i > right_index {
-                                        Some(" /")
-                                    } else if i == right_index {
-                                        None
-                                    } else if i >= (right_index - 1) {
-                                        Some("|/")
-                                    } else if i > left_index {
-                                        Some("|_")
-                                    } else {
-                                        Some("| ")
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .concat();
-
-                            writeln!(&mut writer, "{}", line)?;
-
-                            let track_count = tracks.len() - 1;
-                            let line = (0..track_count)
-                                .map(|i| {
-                                    if i == left_index {
-                                        "|/"
-                                    } else if i == (track_count - 1) {
-                                        "|"
-                                    } else {
-                                        "| "
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .concat();
-
-                            writeln!(&mut writer, "{}", line)?;
+                    .position(|t| t == parent)
+                    .expect(&format!("no parent {parent:?} found in {tracks:?}"));
+                if tracks.len() > 1 {
+                    for l_i in 0..(tracks.len() - parent_position) {
+                        for (i, track_id) in tracks.iter().enumerate() {
+                            let ii = tracks.len() - i;
+                            if ii == l_i {
+                                write!(w, "{}", "└┐".color(to_color(*track_id)))?;
+                            } else {
+                                write!(w, "{}", "│".color(to_color(*track_id)))?;
+                            }
                         }
-
-                        tracks.remove(from_track_index);
-                    } else {
-                        stop_track(&mut writer, &mut tracks, from_track_id)?;
+                        writeln!(w)?;
                     }
                 }
+                tracks.insert(parent_position + 1, *child);
+                for track_id in tracks.iter() {
+                    write!(
+                        w,
+                        "{}",
+                        if track_id == child {
+                            "┐"
+                        } else if track_id == parent {
+                            "├"
+                        } else {
+                            "│"
+                        }
+                        .color(to_color(*track_id))
+                    )?;
+                }
+                writeln!(w)?;
             }
+            Event::JoinTrack(child, target) => {
+                let target_position = tracks.iter().position(|t| t == target).unwrap();
+                let child_position = tracks
+                    .iter()
+                    .position(|t| t == child)
+                    .expect(&format!("child {child:?} not found in {tracks:?}"));
+                let min_position = target_position.min(child_position);
+                let max_position = target_position.max(child_position);
+                for (i, track_id) in tracks.iter().enumerate() {
+                    if i == target_position {
+                        write!(
+                            w,
+                            "{}",
+                            if child_position > target_position {
+                                "├"
+                            } else {
+                                "┤"
+                            }
+                            .color(to_color(*track_id))
+                        )?;
+                    } else if i == child_position {
+                        write!(
+                            w,
+                            "{}",
+                            if child_position > target_position {
+                                "┘"
+                            } else {
+                                "└"
+                            }
+                            .color(to_color(*child))
+                        )?;
+                    } else if i > min_position && i < max_position {
+                        write!(w, "{}", "─".color(to_color(*child)))?;
+                    } else {
+                        write!(w, "{}", "│".color(to_color(*track_id)))?;
+                    }
+                }
+                writeln!(w)?;
+                tracks.retain(|t| t != child);
+                for i in if child_position > target_position {
+                    max_position
+                } else {
+                    min_position + 1
+                }..tracks.len()
+                {
+                    for (j, track_id) in tracks.iter().enumerate() {
+                        if j == i && j != 0 {
+                            write!(w, "{}", "┌┘".color(to_color(*track_id)))?;
+                        } else {
+                            write!(w, "{}", "│".color(to_color(*track_id)))?;
+                        }
+                    }
+                    writeln!(w)?;
+                }
+            }
+            Event::NoEvent => {
+                for track_id in tracks.iter() {
+                    write!(w, "{}", "│".color(to_color(*track_id)))?;
+                }
 
-            NoEvent => {
-                let line = iter::repeat("|")
-                    .take(tracks.len())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-
-                writeln!(&mut writer, "{}", line)?;
+                writeln!(w)?;
             }
         }
     }
@@ -442,35 +433,8 @@ pub fn to_writer<W: Write>(mut writer: W, events: &[Event]) -> io::Result<()> {
     Ok(())
 }
 
-fn stop_track<W: Write>(mut writer: W, tracks: &mut Vec<usize>, track_id: usize) -> io::Result<()> {
-    if let Some(index) = tracks.iter().position(|&id| id == track_id) {
-        let line = (0..tracks.len())
-            .map(|i| if i == index { "\"" } else { "|" })
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        writeln!(&mut writer, "{}", line)?;
-
-        if index != (tracks.len() - 1) {
-            let line = (0..tracks.len())
-                .map(|i| {
-                    use std::cmp::Ordering::*;
-                    match i.cmp(&index) {
-                        Greater => "/",
-                        Equal => "",
-                        Less => "|",
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            writeln!(&mut writer, "{}", line)?;
-        }
-
-        tracks.remove(index);
-    }
-
-    Ok(())
+fn to_color(i: TrackId) -> XtermColors {
+    XtermColors::from((((i.0 + 1) ^ 93) % 255) as u8)
 }
 
 /// Write `&[`[`Event`]`]` to [`Vec<u8>`].
@@ -488,7 +452,6 @@ fn stop_track<W: Write>(mut writer: W, tracks: &mut Vec<usize>, track_id: usize)
 /// [`Metro::to_vec`]: struct.Metro.html#method.to_vec
 ///
 /// [`Vec<u8>`]: https://doc.rust-lang.org/stable/std/vec/struct.Vec.html
-#[inline]
 pub fn to_vec(events: &[Event]) -> io::Result<Vec<u8>> {
     let mut vec = Vec::new();
     to_writer(&mut vec, events)?;
@@ -510,594 +473,12 @@ pub fn to_vec(events: &[Event]) -> io::Result<Vec<u8>> {
 /// [`Metro::to_string`]: struct.Metro.html#method.to_string
 ///
 /// [`String`]: https://doc.rust-lang.org/stable/std/string/struct.String.html
-#[inline]
 pub fn to_string(events: &[Event]) -> io::Result<String> {
     let vec = to_vec(events)?;
-    // Ok(String::from_utf8(vec)?)
     // Metro only writes `str`s and `String`s to the `vec`
     // which are always valid UTF-8, so this is safe.
     #[allow(unsafe_code)]
     unsafe {
         Ok(String::from_utf8_unchecked(vec))
-    }
-}
-
-/*
-/// `Error` is an error that can be returned by
-/// [`to_string`], [`to_vec`], and [`to_writer`].
-///
-/// [`to_writer`]: fn.to_writer.html
-/// [`to_vec`]: fn.to_vec.html
-/// [`to_string`]: fn.to_string.html
-#[derive(Debug)]
-pub enum Error {
-    /// [See `std::io::Error`][io::Error].
-    ///
-    /// [io::Error]: https://doc.rust-lang.org/std/io/struct.Error.html
-    IoError(io::Error),
-
-    /// [See `std::string::FromUtf8Error`][FromUtf8Error].
-    ///
-    /// [FromUtf8Error]: https://doc.rust-lang.org/std/string/struct.FromUtf8Error.html
-    FromUtf8Error(FromUtf8Error),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        use Error::*;
-        match self {
-            IoError(err) => err.fmt(fmt),
-            FromUtf8Error(err) => err.fmt(fmt),
-        }
-    }
-}
-
-impl error::Error for Error {
-    #[inline]
-    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-        use Error::*;
-        match self {
-            IoError(ref err) => Some(err),
-            FromUtf8Error(ref err) => Some(err),
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    #[inline]
-    fn from(err: io::Error) -> Self {
-        Self::IoError(err)
-    }
-}
-
-impl From<FromUtf8Error> for Error {
-    #[inline]
-    fn from(err: FromUtf8Error) -> Self {
-        Self::FromUtf8Error(err)
-    }
-}
-// */
-
-#[cfg(test)]
-mod tests {
-    use std::borrow::Cow;
-
-    use super::to_string;
-    use super::Event::*;
-
-    #[test]
-    fn start_track() {
-        let events = [StartTrack(1)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "| |\n");
-    }
-
-    #[test]
-    fn start_track_already_exists() {
-        let events = [StartTrack(0)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "");
-    }
-
-    #[test]
-    fn start_track_already_exists2() {
-        #[rustfmt::skip]
-        let events = [
-            StartTrack(1),
-            StartTrack(2),
-            StartTrack(1),
-            StartTrack(2),
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "| |\n| | |\n");
-    }
-
-    #[test]
-    fn start_track_default() {
-        let events = [StartTrack(0)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "");
-    }
-
-    #[test]
-    fn event_start_track_default2() {
-        let events = [StartTrack(1)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "| |\n");
-    }
-
-    #[test]
-    fn event_start_tracks() {
-        let events = [StartTracks(&[1, 2, 3])];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "| | | |\n");
-    }
-
-    #[test]
-    fn start_tracks_some_already_exist() {
-        let events = [StartTracks(&[0, 1, 2])];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "| | |\n");
-    }
-
-    #[test]
-    fn start_tracks_all_already_exist() {
-        let events = [StartTracks(&[0, 0, 0])];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "");
-    }
-
-    #[test]
-    fn stop_track() {
-        let events = [StopTrack(0)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "\"\n");
-    }
-
-    #[test]
-    fn stop_track_does_not_exist() {
-        let events = [StopTrack(1)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "");
-    }
-
-    #[test]
-    fn stop_track_left() {
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            StopTrack(0),
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | | | |
-" | | | |
- / / / /
-| | | |
-"#
-        );
-    }
-
-    #[test]
-    fn stop_track_middle() {
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            StopTrack(2),
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | | | |
-| | " | |
-| |  / /
-| | | |
-"#
-        );
-    }
-
-    #[test]
-    fn stop_track_right() {
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            StopTrack(4),
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | | | |
-| | | | "
-| | | |
-"#
-        );
-    }
-
-    #[test]
-    fn station() {
-        let events = [
-            StartTracks(&[0, 1, 2]),
-            Station(0, Cow::Borrowed("Station 1")),
-            Station(1, Cow::Borrowed("Station 2")),
-            Station(2, Cow::Borrowed("Station 3")),
-            Station(0, Cow::Borrowed("Station 4")),
-            Station(1, Cow::Borrowed("Station 5")),
-            Station(2, Cow::Borrowed("Station 6")),
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | |
-* | | Station 1
-| * | Station 2
-| | * Station 3
-* | | Station 4
-| * | Station 5
-| | * Station 6
-"#
-        );
-    }
-
-    #[test]
-    fn station_non_existing_track() {
-        let events = [
-            StartTracks(&[0, 1, 2]),
-            Station(0, Cow::Borrowed("Station 1")),
-            Station(1, Cow::Borrowed("Station 2")),
-            Station(2, Cow::Borrowed("Station 3")),
-            Station(3, Cow::Borrowed("Station 4")),
-            Station(4, Cow::Borrowed("Station 5")),
-            Station(5, Cow::Borrowed("Station 6")),
-            Station(std::usize::MAX, Cow::Borrowed("Station 7")),
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | |
-* | | Station 1
-| * | Station 2
-| | * Station 3
-| | | Station 4
-| | | Station 5
-| | | Station 6
-| | | Station 7
-"#
-        );
-    }
-
-    #[test]
-    fn station_multiple_lines() {
-        let events = [
-            StartTracks(&[0, 1, 2]),
-            Station(0, Cow::Borrowed("Foo 0\nBar 0\r\nBaz 0")),
-            Station(1, Cow::Borrowed("Foo 1\nBar 1\r\nBaz 1")),
-            Station(2, Cow::Borrowed("Foo 2\nBar 2\r\nBaz 2")),
-            Station(3, Cow::Borrowed("Foo 3\nBar 3\r\nBaz 3")),
-            Station(4, Cow::Borrowed("Foo 4\nBar 4\r\nBaz 4")),
-            Station(5, Cow::Borrowed("Foo 5\nBar 5\r\nBaz 5")),
-            Station(
-                std::usize::MAX,
-                Cow::Borrowed("Foo MAX\nBar MAX\r\nBaz MAX"),
-            ),
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | |
-* | | Foo 0
-| | | Bar 0
-| | | Baz 0
-| * | Foo 1
-| | | Bar 1
-| | | Baz 1
-| | * Foo 2
-| | | Bar 2
-| | | Baz 2
-| | | Foo 3
-| | | Bar 3
-| | | Baz 3
-| | | Foo 4
-| | | Bar 4
-| | | Baz 4
-| | | Foo 5
-| | | Bar 5
-| | | Baz 5
-| | | Foo MAX
-| | | Bar MAX
-| | | Baz MAX
-"#
-        );
-    }
-
-    #[test]
-    fn split_track() {
-        let events = [
-            SplitTrack(0, 1),
-            NoEvent,
-            SplitTrack(0, 2),
-            SplitTrack(1, 3),
-            SplitTrack(3, 4),
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"|\
-| |
-|\ \
-| | |\
-| | | |\
-"#
-        );
-    }
-
-    #[test]
-    fn split_track_non_existing_from_track() {
-        let events1 = [
-            SplitTrack(1, 2),
-            SplitTrack(3, 4),
-            Station(2, Cow::Borrowed("2")),
-            Station(4, Cow::Borrowed("4")),
-        ];
-        let events2 = [
-            StartTrack(2),
-            StartTrack(4),
-            Station(2, Cow::Borrowed("2")),
-            Station(4, Cow::Borrowed("4")),
-        ];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn split_track_already_existing_new_track() {
-        let events1 = [
-            StartTracks(&[0, 1, 2]),
-            SplitTrack(0, 1),
-            SplitTrack(0, 2),
-            SplitTrack(3, 4),
-            Station(0, Cow::Borrowed("0")),
-            Station(1, Cow::Borrowed("1")),
-            Station(2, Cow::Borrowed("2")),
-            Station(3, Cow::Borrowed("3")),
-            Station(4, Cow::Borrowed("4")),
-        ];
-        let events2 = [
-            StartTracks(&[0, 1, 2]),
-            StartTrack(4),
-            Station(0, Cow::Borrowed("0")),
-            Station(1, Cow::Borrowed("1")),
-            Station(2, Cow::Borrowed("2")),
-            Station(3, Cow::Borrowed("3")),
-            Station(4, Cow::Borrowed("4")),
-        ];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn split_track_same_from_and_new_track() {
-        let events = [SplitTrack(0, 0)];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "");
-
-        #[rustfmt::skip]
-        let events1 = [
-            StartTracks(&[0, 1, 2]),
-            SplitTrack(1, 1),
-            SplitTrack(0, 2),
-        ];
-        let events2 = [StartTracks(&[0, 1, 2])];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn join_track_zero_between() {
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2]),
-            JoinTrack(1, 0),
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | |
-|/ /
-| |
-"#
-        );
-    }
-
-    #[test]
-    fn join_track_one_between() {
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2]),
-            JoinTrack(2, 0),
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | |
-| |/
-|/|
-| |
-"#
-        );
-    }
-
-    #[test]
-    fn join_track_many_between() {
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            JoinTrack(4, 0),
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(
-            string,
-            r#"| | | | |
-| |_|_|/
-|/| | |
-| | | |
-"#
-        );
-    }
-
-    #[test]
-    fn join_track_always_leftmost() {
-        let events1 = [
-            StartTracks(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
-            JoinTrack(4, 1),
-            JoinTrack(5, 0),
-            JoinTrack(8, 7),
-            JoinTrack(9, 6),
-            NoEvent,
-        ];
-
-        let events2 = events1
-            .iter()
-            .cloned()
-            .map(|event| match event {
-                JoinTrack(from, to) => JoinTrack(to, from),
-                _ => event,
-            })
-            .collect::<Vec<_>>();
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        // Note these only visually looks the same,
-        // the actual deleted track is not the same.
-        assert_eq!(string1, string2);
-    }
-
-    // The above `join_track` tests are all `existing_from_track_existing_to_track`
-
-    #[test]
-    fn join_track_non_existing_from_track_existing_to_track() {
-        let events1 = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            JoinTrack(5, 0),
-            JoinTrack(10, 1),
-        ];
-        let events2 = [StartTracks(&[0, 1, 2, 3, 4])];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn join_track_non_existing_from_track_non_existing_to_track() {
-        let events1 = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            JoinTrack(5, 6),
-            JoinTrack(10, 11),
-        ];
-        let events2 = [StartTracks(&[0, 1, 2, 3, 4])];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn join_track_existing_from_track_non_existing_to_track() {
-        let events1 = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            JoinTrack(0, 5),
-            JoinTrack(2, 10),
-        ];
-        #[rustfmt::skip]
-        let events2 = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            StopTrack(0),
-            StopTrack(2),
-        ];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn join_track_same_from_and_to_track() {
-        let events1 = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            JoinTrack(0, 0),
-            JoinTrack(2, 2),
-            JoinTrack(10, 10),
-        ];
-        #[rustfmt::skip]
-        let events2 = [
-            StartTracks(&[0, 1, 2, 3, 4]),
-            StopTrack(0),
-            StopTrack(2),
-        ];
-
-        let string1 = to_string(&events1).unwrap();
-        let string2 = to_string(&events2).unwrap();
-
-        assert_eq!(string1, string2);
-    }
-
-    #[test]
-    fn no_event() {
-        let events = [NoEvent, NoEvent, NoEvent];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "|\n|\n|\n");
-
-        #[rustfmt::skip]
-        let events = [
-            StartTracks(&[0, 1, 2]),
-            NoEvent,
-            NoEvent,
-            NoEvent,
-        ];
-        let string = to_string(&events).unwrap();
-
-        assert_eq!(string, "| | |\n| | |\n| | |\n| | |\n");
     }
 }

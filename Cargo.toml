@@ -16,6 +16,8 @@ exclude = [".travis.yml"]
 travis-ci = { repository = "vallentin/metro" }
 
 [dependencies]
+derive_more = {version = "2.0.1", features = ["debug", "deref", "from", "into"]}
+owo-colors = "4.2.2"
 
-[dev-dependencies]
-git2 = "0.13"
+# [dev-dependencies]
+# git2 = "0.13"
