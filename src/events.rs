@@ -1,84 +1,93 @@
+use compact_str::CompactString;
 use derive_more::{From, Into};
 use owo_colors::{OwoColorize, XtermColors};
 use std::borrow::Cow;
 use std::io::{self, Write};
 
-/// `Event`s are produced automatically by using [`Metro`],
-/// but can also be created and used manually.
-///
-/// An `Event` specifies an action and is used when rendering
-/// the metro lines graph.
-///
-/// [`Metro`]: struct.Metro.html
-///
-/// # Example
-///
-/// ```no_run
-/// use metro::Event;
-///
-/// let events = [
-///     Event::station(0, "Station 1"),
-///     Event::station(0, "Station 2"),
-///     Event::station(0, "Station 3"),
-///     Event::SplitTrack(0, 1),
-///     Event::station(1, "Station 4"),
-///     Event::SplitTrack(1, 2),
-///     Event::station(1, "Station 5"),
-///     Event::station(2, "Station 6"),
-///     Event::station(0, "Station 7"),
-///     Event::station(1, "Station 8"),
-///     Event::station(2, "Station 9"),
-///     Event::SplitTrack(2, 3),
-///     Event::SplitTrack(3, 4),
-///     Event::station(5, "Station 10 (Detached)"),
-///     Event::JoinTrack(4, 0),
-///     Event::station(3, "Station 11"),
-///     Event::StopTrack(1),
-///     Event::station(0, "Station 12"),
-///     Event::station(2, "Station 13"),
-///     Event::station(3, "Station 14"),
-///     Event::JoinTrack(3, 0),
-///     Event::station(2, "Station 15"),
-///     Event::StopTrack(2),
-///     Event::station(0, "Station 16"),
-/// ];
-///
-/// let string = metro::to_string(&events).unwrap();
-///
-/// println!("{}", string);
-/// ```
-///
-/// This will output the following:
-///
-/// ```text
-/// * Station 1
-/// * Station 2
-/// * Station 3
-/// |\
-/// | * Station 4
-/// | |\
-/// | * | Station 5
-/// | | * Station 6
-/// * | | Station 7
-/// | * | Station 8
-/// | | * Station 9
-/// | | |\
-/// | | | |\
-/// | | | | | Station 10 (Detached)
-/// | |_|_|/
-/// |/| | |
-/// | | | * Station 11
-/// | " | |
-/// |  / /
-/// * | | Station 12
-/// | * | Station 13
-/// | | * Station 14
-/// | |/
-/// |/|
-/// | * Station 15
-/// | "
-/// * Station 16
-/// ```
+#[derive(Clone, Copy)]
+enum Rail {
+    Straight,
+    Horizontal,
+    Station,
+    Ground,
+    ShiftRight,
+    ShiftLeft,
+    TopRight,
+    BottomRight,
+    BottomtLeft,
+    SplitRight,
+    SplitLeft,
+}
+
+pub struct RenderingSettings {
+    splat: usize,
+    color: bool,
+    rounded: bool,
+}
+impl Default for RenderingSettings {
+    fn default() -> Self {
+        Self {
+            splat: 5,
+            color: true,
+            rounded: false,
+        }
+    }
+}
+impl RenderingSettings {
+    pub fn splat(mut self, splat_factor: usize) -> Self {
+        self.splat = splat_factor;
+        self
+    }
+
+    pub fn color(mut self, colored: bool) -> Self {
+        self.color = colored;
+        self
+    }
+
+    fn colorize<S: AsRef<str>>(&self, s: S, i: &TrackId) -> CompactString {
+        if self.color {
+            let color = XtermColors::from((((i.0 + 1) ^ 93) % 255) as u8);
+            s.as_ref().color(color).to_string().into()
+        } else {
+            s.as_ref().into()
+        }
+    }
+
+    fn rail_to_str(&self, rail: Rail) -> CompactString {
+        use std::fmt::Write;
+
+        let mut r = CompactString::with_capacity(self.splat + 2);
+        match rail {
+            Rail::Straight => write!(r, "│{}", " ".repeat(self.splat)),
+            Rail::Horizontal => write!(r, "{}", "─".repeat(self.splat + 1)),
+            Rail::Station => write!(r, "╪{}", " ".repeat(self.splat)),
+            Rail::Ground => write!(r, "┷{}", " ".repeat(self.splat)),
+            Rail::ShiftRight => write!(r, "└{}┐{}", "─".repeat(self.splat), " ".repeat(self.splat)),
+            Rail::ShiftLeft => write!(r, "┌{}┘", "─".repeat(self.splat)),
+            Rail::TopRight => write!(r, "{}┐{}", "─".repeat(self.splat), " ".repeat(self.splat)),
+            Rail::BottomRight => write!(r, "{}┘{}", "─".repeat(self.splat), " ".repeat(self.splat)),
+            Rail::BottomtLeft => write!(r, "└{}", "─".repeat(self.splat)),
+            Rail::SplitRight => write!(r, "├"),
+            Rail::SplitLeft => write!(r, "{}┤", "─".repeat(self.splat)),
+        }
+        .unwrap();
+        r
+    }
+}
+
+trait RenderStr {
+    fn render(&self, s: &RenderingSettings, i: &TrackId) -> CompactString;
+}
+impl RenderStr for Rail {
+    fn render(&self, s: &RenderingSettings, i: &TrackId) -> CompactString {
+        s.colorize(s.rail_to_str(*self), i)
+    }
+}
+
+#[derive(PartialEq, Eq, Hash, From, Into, Debug, Clone, Copy)]
+/// An ID referencing a `Track`
+pub struct TrackId(usize);
+
 #[derive(Clone, Debug)]
 pub enum Event<'a> {
     /// `StartTrack(track_id)`
@@ -234,251 +243,256 @@ pub enum Event<'a> {
     NoEvent,
 }
 
-impl<'a> Event<'a> {
-    /// *[See `Event::Station` for more information.][`Event::Station`]*
-    ///
-    /// [`Event::Station`]: enum.Event.html#variant.Station
-    #[inline]
-    pub fn station<S: Into<Cow<'a, str>>>(track_id: TrackId, text: S) -> Self {
-        Self::Station(track_id, text.into())
-    }
+#[derive(Default)]
+pub struct Metro<'a> {
+    events: Vec<Event<'a>>,
+    rdr: RenderingSettings,
 }
+impl<'a> Metro<'a> {
+    pub fn with_settings(rdr: RenderingSettings) -> Self {
+        Self {
+            rdr,
+            ..Default::default()
+        }
+    }
+    pub fn push(&mut self, event: Event<'a>) {
+        self.events.push(event);
+    }
+    /// Write `&[`[`Event`]`]` to [`<W: io::Write>`].
+    /// Defines a default track with `track_id` of `0`.
+    ///
+    /// *[See also `Metro::to_writer`.][`Metro::to_writer`]*
+    ///
+    /// *See also [`to_string`] and [`to_vec`].*
+    ///
+    /// [`to_vec`]: fn.to_vec.html
+    /// [`to_string`]: fn.to_string.html
+    ///
+    /// [`Event`]: enum.Event.html
+    ///
+    /// [`Metro::to_writer`]: struct.Metro.html#method.to_writer
+    ///
+    /// [`<W: io::Write>`]: https://doc.rust-lang.org/stable/std/io/trait.Write.html
+    pub fn to_writer<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        let mut tracks = vec![0.into()];
+        let widest_track = self
+            .events
+            .iter()
+            .fold((1, 1), |(current, max), e| {
+                let current = match e {
+                    Event::StartTrack(_) => current + 1,
+                    Event::StartTracks(track_ids) => current + track_ids.len(),
+                    Event::StopTrack(_) => current - 1,
+                    Event::SplitTrack(_, _) => current + 1,
+                    Event::JoinTrack(_, _) => current - 1,
+                    _ => current,
+                };
+                (current, max.max(current))
+            })
+            .1;
 
-#[derive(PartialEq, Eq, Hash, From, Into, Debug, Clone, Copy)]
-/// An ID referencing a `Track`
-pub struct TrackId(usize);
-
-/// Write `&[`[`Event`]`]` to [`<W: io::Write>`].
-/// Defines a default track with `track_id` of `0`.
-///
-/// *[See also `Metro::to_writer`.][`Metro::to_writer`]*
-///
-/// *See also [`to_string`] and [`to_vec`].*
-///
-/// [`to_vec`]: fn.to_vec.html
-/// [`to_string`]: fn.to_string.html
-///
-/// [`Event`]: enum.Event.html
-///
-/// [`Metro::to_writer`]: struct.Metro.html#method.to_writer
-///
-/// [`<W: io::Write>`]: https://doc.rust-lang.org/stable/std/io/trait.Write.html
-pub fn to_writer<W: Write>(w: &mut W, events: &[Event]) -> io::Result<()> {
-    let mut tracks = vec![0.into()];
-    let widest_track = events
-        .iter()
-        .fold((1, 1), |(current, max), e| {
-            let current = match e {
-                Event::StartTrack(_) => current + 1,
-                Event::StartTracks(track_ids) => current + track_ids.len(),
-                Event::StopTrack(_) => current - 1,
-                Event::SplitTrack(_, _) => current + 1,
-                Event::JoinTrack(_, _) => current - 1,
-                _ => current,
-            };
-            (current, max.max(current))
-        })
-        .1;
-
-    for event in events {
-        match event {
-            Event::StartTrack(track_id) => {
-                assert!(!tracks.contains(track_id));
-                tracks.push(*track_id);
-            }
-            Event::StartTracks(track_ids) => {
-                for track_id in track_ids.iter() {
+        for event in self.events.iter() {
+            match event {
+                Event::StartTrack(track_id) => {
                     assert!(!tracks.contains(track_id));
                     tracks.push(*track_id);
                 }
-            }
-            Event::StopTrack(stopped) => {
-                assert!(tracks.contains(stopped));
-                tracks.retain(|t| t != stopped);
-                for track_id in tracks.iter() {
-                    write!(
-                        w,
-                        "{}",
-                        if track_id == stopped { "╧" } else { "│" }.color(to_color(*track_id))
-                    )?;
+                Event::StartTracks(track_ids) => {
+                    for track_id in track_ids.iter() {
+                        assert!(!tracks.contains(track_id));
+                        tracks.push(*track_id);
+                    }
                 }
-                writeln!(w)?;
-            }
-            Event::Station(target_id, cow) => {
-                for (i, line) in cow.lines().enumerate() {
+                Event::StopTrack(stopped) => {
+                    assert!(tracks.contains(stopped));
                     for track_id in tracks.iter() {
                         write!(
                             w,
                             "{}",
-                            if i == 0 && track_id == target_id {
-                                "║"
+                            if track_id == stopped {
+                                Rail::Ground
                             } else {
-                                "│"
+                                Rail::Ground
+                                // Rail::Straight
                             }
-                            .color(to_color(*track_id))
+                            .render(&self.rdr, track_id)
                         )?;
                     }
-                    write!(
-                        w,
-                        "{line:>pad$}",
-                        pad = line.len() + widest_track - tracks.len() + 3
-                    )?;
+                    writeln!(w)?;
+                    tracks.retain(|t| t != stopped);
+                }
+                Event::Station(target_id, cow) => {
+                    for (i, line) in cow.lines().enumerate() {
+                        for track_id in tracks.iter() {
+                            write!(
+                                w,
+                                "{}",
+                                if i == 0 && track_id == target_id {
+                                    Rail::Station
+                                } else {
+                                    Rail::Straight
+                                }
+                                .render(&self.rdr, track_id)
+                            )?;
+                        }
+                        write!(
+                            w,
+                            "{line:>pad$}",
+                            pad = line.len() + widest_track - tracks.len() + 3
+                        )?;
+                        writeln!(w)?;
+                    }
+                    for track_id in tracks.iter() {
+                        write!(w, "{}", Rail::Straight.render(&self.rdr, track_id))?;
+                    }
                     writeln!(w)?;
                 }
-                for track_id in tracks.iter() {
-                    write!(w, "{}", "│".color(to_color(*track_id)))?;
-                }
-                writeln!(w)?;
-            }
-            Event::SplitTrack(parent, child) => {
-                let parent_position = tracks
-                    .iter()
-                    .position(|t| t == parent)
-                    .expect(&format!("no parent {parent:?} found in {tracks:?}"));
-                if tracks.len() > 1 {
-                    for l_i in 0..(tracks.len() - parent_position) {
-                        for (i, track_id) in tracks.iter().enumerate() {
-                            let ii = tracks.len() - i;
-                            if ii == l_i {
-                                write!(w, "{}", "└┐".color(to_color(*track_id)))?;
+                Event::SplitTrack(parent, child) => {
+                    let parent_position = tracks
+                        .iter()
+                        .position(|t| t == parent)
+                        .expect(&format!("no parent {parent:?} found in {tracks:?}"));
+                    if tracks.len() > 1 {
+                        for l_i in 0..(tracks.len() - parent_position) {
+                            for (i, track_id) in tracks.iter().enumerate() {
+                                let ii = tracks.len() - i;
+                                if ii == l_i {
+                                    write!(w, "{}", Rail::ShiftRight.render(&self.rdr, track_id))?;
+                                } else {
+                                    write!(w, "{}", Rail::Straight.render(&self.rdr, track_id))?;
+                                }
+                            }
+                            writeln!(w)?;
+                        }
+                    }
+                    tracks.insert(parent_position + 1, *child);
+                    for track_id in tracks.iter() {
+                        write!(
+                            w,
+                            "{}",
+                            if track_id == child {
+                                Rail::TopRight
+                            } else if track_id == parent {
+                                Rail::SplitRight
                             } else {
-                                write!(w, "{}", "│".color(to_color(*track_id)))?;
+                                Rail::Straight
+                            }
+                            .render(&self.rdr, track_id)
+                        )?;
+                    }
+                    writeln!(w)?;
+                }
+                Event::JoinTrack(child, target) => {
+                    let target_position = tracks.iter().position(|t| t == target).unwrap();
+                    let child_position = tracks
+                        .iter()
+                        .position(|t| t == child)
+                        .expect(&format!("child {child:?} not found in {tracks:?}"));
+                    let min_position = target_position.min(child_position);
+                    let max_position = target_position.max(child_position);
+                    for (i, track_id) in tracks.iter().enumerate() {
+                        if i == target_position {
+                            write!(
+                                w,
+                                "{}",
+                                if child_position > target_position {
+                                    Rail::SplitRight
+                                } else {
+                                    Rail::SplitLeft
+                                }
+                                .render(&self.rdr, track_id)
+                            )?;
+                        } else if i == child_position {
+                            write!(
+                                w,
+                                "{}",
+                                if child_position > target_position {
+                                    Rail::BottomRight
+                                } else {
+                                    Rail::BottomtLeft
+                                }
+                                .render(&self.rdr, child)
+                            )?;
+                        } else if i > min_position && i < max_position {
+                            write!(w, "{}", Rail::Horizontal.render(&self.rdr, child))?;
+                        } else {
+                            write!(w, "{}", Rail::Straight.render(&self.rdr, track_id))?;
+                        }
+                    }
+                    writeln!(w)?;
+                    tracks.retain(|t| t != child);
+                    for i in if child_position > target_position {
+                        max_position
+                    } else {
+                        min_position + 1
+                    }..tracks.len()
+                    {
+                        for (j, track_id) in tracks.iter().enumerate() {
+                            if j == i && j != 0 {
+                                write!(w, "{}", Rail::ShiftLeft.render(&self.rdr, track_id))?;
+                            } else {
+                                write!(w, "{}", Rail::Straight.render(&self.rdr, track_id))?;
                             }
                         }
                         writeln!(w)?;
                     }
                 }
-                tracks.insert(parent_position + 1, *child);
-                for track_id in tracks.iter() {
-                    write!(
-                        w,
-                        "{}",
-                        if track_id == child {
-                            "┐"
-                        } else if track_id == parent {
-                            "├"
-                        } else {
-                            "│"
-                        }
-                        .color(to_color(*track_id))
-                    )?;
-                }
-                writeln!(w)?;
-            }
-            Event::JoinTrack(child, target) => {
-                let target_position = tracks.iter().position(|t| t == target).unwrap();
-                let child_position = tracks
-                    .iter()
-                    .position(|t| t == child)
-                    .expect(&format!("child {child:?} not found in {tracks:?}"));
-                let min_position = target_position.min(child_position);
-                let max_position = target_position.max(child_position);
-                for (i, track_id) in tracks.iter().enumerate() {
-                    if i == target_position {
-                        write!(
-                            w,
-                            "{}",
-                            if child_position > target_position {
-                                "├"
-                            } else {
-                                "┤"
-                            }
-                            .color(to_color(*track_id))
-                        )?;
-                    } else if i == child_position {
-                        write!(
-                            w,
-                            "{}",
-                            if child_position > target_position {
-                                "┘"
-                            } else {
-                                "└"
-                            }
-                            .color(to_color(*child))
-                        )?;
-                    } else if i > min_position && i < max_position {
-                        write!(w, "{}", "─".color(to_color(*child)))?;
-                    } else {
-                        write!(w, "{}", "│".color(to_color(*track_id)))?;
+                Event::NoEvent => {
+                    for track_id in tracks.iter() {
+                        write!(w, "{}", Rail::Straight.render(&self.rdr, track_id))?;
                     }
-                }
-                writeln!(w)?;
-                tracks.retain(|t| t != child);
-                for i in if child_position > target_position {
-                    max_position
-                } else {
-                    min_position + 1
-                }..tracks.len()
-                {
-                    for (j, track_id) in tracks.iter().enumerate() {
-                        if j == i && j != 0 {
-                            write!(w, "{}", "┌┘".color(to_color(*track_id)))?;
-                        } else {
-                            write!(w, "{}", "│".color(to_color(*track_id)))?;
-                        }
-                    }
+
                     writeln!(w)?;
                 }
             }
-            Event::NoEvent => {
-                for track_id in tracks.iter() {
-                    write!(w, "{}", "│".color(to_color(*track_id)))?;
-                }
-
-                writeln!(w)?;
-            }
         }
+
+        Ok(())
     }
 
-    Ok(())
-}
+    /// Write `&[`[`Event`]`]` to [`Vec<u8>`].
+    /// Defines a default track with `track_id` of `0`.
+    ///
+    /// *[See also `Metro::to_vec`.][`Metro::to_vec`]*
+    ///
+    /// *See also [`to_string`] and [`to_writer`].*
+    ///
+    /// [`to_writer`]: fn.to_writer.html
+    /// [`to_string`]: fn.to_string.html
+    ///
+    /// [`Event`]: enum.Event.html
+    ///
+    /// [`Metro::to_vec`]: struct.Metro.html#method.to_vec
+    ///
+    /// [`Vec<u8>`]: https://doc.rust-lang.org/stable/std/vec/struct.Vec.html
+    pub fn to_vec(&self) -> io::Result<Vec<u8>> {
+        let mut vec = Vec::new();
+        self.to_writer(&mut vec)?;
+        Ok(vec)
+    }
 
-fn to_color(i: TrackId) -> XtermColors {
-    XtermColors::from((((i.0 + 1) ^ 93) % 255) as u8)
-}
-
-/// Write `&[`[`Event`]`]` to [`Vec<u8>`].
-/// Defines a default track with `track_id` of `0`.
-///
-/// *[See also `Metro::to_vec`.][`Metro::to_vec`]*
-///
-/// *See also [`to_string`] and [`to_writer`].*
-///
-/// [`to_writer`]: fn.to_writer.html
-/// [`to_string`]: fn.to_string.html
-///
-/// [`Event`]: enum.Event.html
-///
-/// [`Metro::to_vec`]: struct.Metro.html#method.to_vec
-///
-/// [`Vec<u8>`]: https://doc.rust-lang.org/stable/std/vec/struct.Vec.html
-pub fn to_vec(events: &[Event]) -> io::Result<Vec<u8>> {
-    let mut vec = Vec::new();
-    to_writer(&mut vec, events)?;
-    Ok(vec)
-}
-
-/// Write `&[`[`Event`]`]` to [`String`].
-/// Defines a default track with `track_id` of `0`.
-///
-/// *[See also `Metro::to_string`.][`Metro::to_string`]*
-///
-/// *See also [`to_vec`] and [`to_writer`].*
-///
-/// [`to_writer`]: fn.to_writer.html
-/// [`to_vec`]: fn.to_vec.html
-///
-/// [`Event`]: enum.Event.html
-///
-/// [`Metro::to_string`]: struct.Metro.html#method.to_string
-///
-/// [`String`]: https://doc.rust-lang.org/stable/std/string/struct.String.html
-pub fn to_string(events: &[Event]) -> io::Result<String> {
-    let vec = to_vec(events)?;
-    // Metro only writes `str`s and `String`s to the `vec`
-    // which are always valid UTF-8, so this is safe.
-    #[allow(unsafe_code)]
-    unsafe {
-        Ok(String::from_utf8_unchecked(vec))
+    /// Write `&[`[`Event`]`]` to [`String`].
+    /// Defines a default track with `track_id` of `0`.
+    ///
+    /// *[See also `Metro::to_string`.][`Metro::to_string`]*
+    ///
+    /// *See also [`to_vec`] and [`to_writer`].*
+    ///
+    /// [`to_writer`]: fn.to_writer.html
+    /// [`to_vec`]: fn.to_vec.html
+    ///
+    /// [`Event`]: enum.Event.html
+    ///
+    /// [`Metro::to_string`]: struct.Metro.html#method.to_string
+    ///
+    /// [`String`]: https://doc.rust-lang.org/stable/std/string/struct.String.html
+    pub fn to_string(&self) -> io::Result<String> {
+        let vec = self.to_vec()?;
+        // Metro only writes `str`s and `String`s to the `vec`
+        // which are always valid UTF-8, so this is safe.
+        #[allow(unsafe_code)]
+        unsafe {
+            Ok(String::from_utf8_unchecked(vec))
+        }
     }
 }

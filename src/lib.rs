@@ -131,7 +131,7 @@
 #![deny(unsafe_code)]
 #![warn(clippy::all)]
 mod events;
-mod metro;
-
-pub use crate::metro::{Metro, Track};
-pub use events::*;
+pub use events::Event;
+pub use events::Metro;
+pub use events::RenderingSettings;
+pub use events::TrackId;
